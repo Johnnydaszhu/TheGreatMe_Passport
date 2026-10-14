@@ -12,6 +12,8 @@ idf_component_register(
          "lv_font_terminal_zh_16.c"
          "lv_font_terminal_extra_16.c"
          "passport_protocol.c"
+         "passport_host.c"
+         "passport_theme.c"
          "adpcm.c"
          "demo_low_power.c"
     INCLUDE_DIRS "."

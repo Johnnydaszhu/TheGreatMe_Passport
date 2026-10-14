@@ -12,6 +12,7 @@ extern "C" {
 #define PASSPORT_DIALOGUE_TEXT_CAP 192
 #define PASSPORT_BOARD_PAYLOAD_CAP 240
 #define PASSPORT_BOARD_TASK_COUNT 5
+#define PASSPORT_HOST_NAME_CAP 16
 
 typedef enum {
     PASSPORT_TASK_TODO = 0,
@@ -43,6 +44,14 @@ typedef enum {
     PASSPORT_LANGUAGE_JA,
 } passport_language_t;
 
+// Theme color pushed by the app. UNSET means no K: line arrived since boot, so
+// the device keeps whatever theme the user picked on it.
+typedef enum {
+    PASSPORT_THEME_COLOR_UNSET = 0,
+    PASSPORT_THEME_COLOR_NONE,
+    PASSPORT_THEME_COLOR_CUSTOM,
+} passport_theme_color_state_t;
+
 typedef struct {
     passport_language_t language;
     uint8_t progress;
@@ -55,6 +64,10 @@ typedef struct {
     char user_name[PASSPORT_BOARD_TEXT_CAP + 1];
     char dialogue_user[PASSPORT_DIALOGUE_TEXT_CAP + 1];
     char dialogue_answer[PASSPORT_DIALOGUE_TEXT_CAP + 1];
+    // The connected host's device type, such as "iPhone" or "Mac".
+    char host_name[PASSPORT_HOST_NAME_CAP + 1];
+    passport_theme_color_state_t theme_color_state;
+    uint32_t theme_color; // 0xRRGGBB when theme_color_state is CUSTOM
 } passport_board_t;
 
 // Apply one UTF-8 board update sent by TheGreatMe. The compact wire format is:
@@ -62,6 +75,7 @@ typedef struct {
 //   C:<0-5>\n0:<O|B|D><task text>\n ... 4:<O|B|D><task text>\n
 //   U:<user name>\nL:<zh-Hans|zh-Hant|en|es|fr|de|ko|ja>\n
 //   Q:<latest user text>\nA:<latest HQ answer>\nS:<I|T|H|A|E>\n
+//   D:<host device, e.g. iPhone or Mac>\nK:<RRGGBB theme color, empty clears>\n
 // Fields may be omitted for partial updates. Invalid input leaves board unchanged.
 bool passport_board_apply(passport_board_t *board, const uint8_t *payload, size_t len);
 

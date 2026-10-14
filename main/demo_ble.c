@@ -10,10 +10,14 @@
 #include "demo_radio.h"
 #include "adpcm.h"
 #include "passport_protocol.h"
+#include "passport_host.h"
+#include "passport_theme.h"
 #include "bsp_audio.h"
 #include "ui_pixel.h"
 
 #include "esp_log.h"
+#include "esp_timer.h"
+#include "nvs.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
@@ -72,6 +76,19 @@ LV_FONT_DECLARE(lv_font_terminal_extra_16);
 #define PASSPORT_SPEAKER_VOLUME 100
 #define RECORDING_CUE_AMPLITUDE 5200
 #define RECORDING_CUE_CHUNK_SAMPLES 160
+// A second host must declare its role (H:P/S/A) soon after connecting.
+#define CANDIDATE_DECLARE_TIMEOUT_MS 5000
+// A refused host gets this long to read the busy error and disconnect itself.
+#define CANDIDATE_REJECT_GRACE_MS 1500
+// After refusing an app that predates role lines, stop inviting takeovers
+// for a while so that app does not reconnect every second.
+#define LEGACY_TAKEOVER_PAUSE_MS 30000
+#define THEME_NVS_NAMESPACE "passport_ui"
+// Theme changes are saved after a short pause so repeated key presses or a
+// color being dragged in the app do not rewrite flash each time.
+#define THEME_SAVE_DELAY_US (1500 * 1000)
+// Hosts that predate the D: line are always the iPhone app.
+#define DEFAULT_HOST_NAME "iPhone"
 
 typedef enum {
     BLE_PAGE_OFF = 0,
@@ -125,6 +142,7 @@ typedef struct {
     const char *app_name;
     const char *terminal_name;
     const char *theme_names[COMPANION_THEME_COUNT];
+    const char *custom_theme_name;
     const char *goal_labels[3];
     const char *goal_placeholders[3];
     const char *tasks_title;
@@ -142,139 +160,140 @@ typedef struct {
     const char *chat_disconnected;
     const char *settings_title;
     const char *connection_title;
-    const char *waiting_iphone;
-    const char *connected_iphone;
+    const char *waiting_host;
+    const char *connected_host; // printf format: %s is the host device
+
     const char *firmware_title;
     const char *theme_title;
     const char *settings_controls;
     const char *voice_recording;
     const char *voice_task_recording;
     const char *voice_release_send;
-    const char *voice_release_task;
+    const char *voice_release_task; // may use %s for the host device
     const char *voice_connecting;
     const char *voice_wait_phone;
     const char *voice_release_cancel;
     const char *voice_phone_linking;
     const char *voice_task_sent;
     const char *voice_transcribing;
-    const char *voice_task_analyzing;
-    const char *voice_no_iphone;
+    const char *voice_task_analyzing; // may use %s for the host device
+    const char *voice_no_host;
     const char *voice_no_phone;
     const char *voice_enable_hint;
 } companion_copy_t;
 
 static const companion_copy_t companion_copies[] = {
     [PASSPORT_LANGUAGE_ZH_HANS] = {
-        "伟大的我", "特工终端", { "琥珀", "黑色", "暖白", "数码绿" },
+        "伟大的我", "特工终端", { "琥珀", "黑色", "暖白", "数码绿" }, "自定义",
         { "本周目标", "本月目标", "年度目标" },
         { "等待本周目标", "等待本月目标", "等待年度目标" },
-        "今日任务", "等待手机同步今日任务", "确定:主题  双击:设置",
+        "今日任务", "等待同步今日任务", "确定:主题  双击:设置",
         "上下切换  双击:设置",
         "长按上:对话  长按下:任务", "你", "总部", "长按上键说话", "总部说话中",
         "听写中", "总部输入中", "长按上键继续", "连接中断", "系统设置", "连接状态",
-        "[等待 iPhone]", "● 已连接 iPhone", "固件版本", "主题选择",
+        "[等待 App 连接]", "● 已连接 %s", "固件版本", "主题选择",
         "上键返回    确定键切换主题", "● 录音中", "● 正在整理任务", "松开发送",
-        "松开下键，交给 iPhone 分析", "连接中", "● 等待手机联动", "松开取消",
-        "手机联动中，松开可取消", "√ 已发送到任务分析", "听写中", "iPhone 正在拆解任务",
-        "未连接 iPhone", "！ 尚未连接手机", "请先在手机开启护照联动",
+        "松开下键，交给 %s 分析", "连接中", "● 等待 App 联动", "松开取消",
+        "联动中，松开可取消", "√ 已发送到任务分析", "听写中", "%s 正在拆解任务",
+        "未连接 App", "！ 尚未连接 App", "请先在 App 开启护照联动",
     },
     [PASSPORT_LANGUAGE_ZH_HANT] = {
-        "偉大的我", "特工終端", { "琥珀", "黑色", "暖白", "數碼綠" },
+        "偉大的我", "特工終端", { "琥珀", "黑色", "暖白", "數碼綠" }, "自選",
         { "本週目標", "本月目標", "年度目標" },
         { "等待本週目標", "等待本月目標", "等待年度目標" },
-        "今日任務", "等待手機同步今日任務", "確定:主題  雙擊:設定",
+        "今日任務", "等待同步今日任務", "確定:主題  雙擊:設定",
         "上下切換  雙擊:設定",
         "長按上:對話  長按下:任務", "你", "總部", "長按上鍵說話", "總部說話中",
         "聽寫中", "總部輸入中", "長按上鍵繼續", "連線中斷", "系統設定", "連線狀態",
-        "[等待 iPhone]", "● 已連線 iPhone", "韌體版本", "主題選擇",
+        "[等待 App 連線]", "● 已連線 %s", "韌體版本", "主題選擇",
         "上鍵返回    確定鍵切換主題", "● 錄音中", "● 正在整理任務", "鬆開傳送",
-        "鬆開下鍵，交給 iPhone 分析", "連線中", "● 等待手機連動", "鬆開取消",
-        "手機連動中，鬆開可取消", "√ 已傳送到任務分析", "聽寫中", "iPhone 正在拆解任務",
-        "未連線 iPhone", "！ 尚未連線手機", "請先在手機開啟護照連動",
+        "鬆開下鍵，交給 %s 分析", "連線中", "● 等待 App 連動", "鬆開取消",
+        "連動中，鬆開可取消", "√ 已傳送到任務分析", "聽寫中", "%s 正在拆解任務",
+        "未連線 App", "！ 尚未連線 App", "請先在 App 開啟護照連動",
     },
     [PASSPORT_LANGUAGE_EN] = {
-        "THE GREAT ME", "AGENT TERMINAL", { "AMBER", "BLACK", "WARM WHITE", "DIGITAL GREEN" },
+        "THE GREAT ME", "AGENT TERMINAL", { "AMBER", "BLACK", "WARM WHITE", "DIGITAL GREEN" }, "CUSTOM",
         { "WEEKLY GOAL", "MONTHLY GOAL", "ANNUAL GOAL" },
         { "Waiting for weekly goal", "Waiting for monthly goal", "Waiting for annual goal" },
-        "TODAY'S TASKS", "Waiting for iPhone tasks", "OK: Theme  OKx2: Settings",
+        "TODAY'S TASKS", "Waiting for today's tasks", "OK: Theme  OKx2: Settings",
         "UP/DOWN: Switch  OKx2: Settings",
         "Hold UP: chat  DOWN: task", "YOU", "HQ", "Hold UP to talk", "HQ speaking",
         "Transcribing", "HQ typing", "Hold UP to continue", "Connection lost", "SYSTEM SETTINGS",
-        "CONNECTION", "[WAITING FOR IPHONE]", "● IPHONE CONNECTED", "FIRMWARE", "THEME",
+        "CONNECTION", "[WAITING FOR APP]", "● %s CONNECTED", "FIRMWARE", "THEME",
         "UP: Back    OK: Change theme", "● RECORDING", "● TASK RECORDING", "Release to send",
-        "Release DOWN for iPhone", "Connecting", "● WAITING FOR IPHONE", "Release to cancel",
-        "Phone linking; release to cancel", "√ SENT FOR TASK ANALYSIS", "Transcribing",
-        "iPhone analyzing task", "No iPhone", "! PHONE NOT CONNECTED", "Enable AI Passport on iPhone",
+        "Release DOWN for %s", "Connecting", "● WAITING FOR APP", "Release to cancel",
+        "Linking; release to cancel", "√ SENT FOR TASK ANALYSIS", "Transcribing",
+        "%s analyzing task", "No app connected", "! APP NOT CONNECTED", "Enable AI Passport in the app",
     },
     [PASSPORT_LANGUAGE_ES] = {
-        "MI GRAN YO", "TERMINAL DE AGENTE", { "ÁMBAR", "NEGRO", "BLANCO", "VERDE DIGITAL" },
+        "MI GRAN YO", "TERMINAL DE AGENTE", { "ÁMBAR", "NEGRO", "BLANCO", "VERDE DIGITAL" }, "PERSONAL",
         { "OBJETIVO SEMANAL", "OBJETIVO MENSUAL", "OBJETIVO ANUAL" },
         { "Esperando objetivo semanal", "Esperando objetivo mensual", "Esperando objetivo anual" },
-        "TAREAS DE HOY", "Esperando tareas del iPhone", "OK: Tema  OKx2: Ajustes",
+        "TAREAS DE HOY", "Esperando tareas de hoy", "OK: Tema  OKx2: Ajustes",
         "UP/DOWN: Cambiar  OKx2: Ajustes",
         "Mantén UP: chat  DOWN: tarea", "TÚ", "HQ", "Mantén UP para hablar", "HQ está hablando",
         "Transcribiendo", "HQ está escribiendo", "Mantén UP para seguir", "Conexión perdida",
-        "AJUSTES", "CONEXIÓN", "[ESPERANDO IPHONE]", "● IPHONE CONECTADO", "FIRMWARE", "TEMA",
+        "AJUSTES", "CONEXIÓN", "[ESPERANDO LA APP]", "● %s CONECTADO", "FIRMWARE", "TEMA",
         "UP: Volver    OK: Cambiar tema", "● GRABANDO", "● GRABANDO TAREA", "Suelta para enviar",
-        "Suelta DOWN para analizar", "Conectando", "● ESPERANDO IPHONE", "Suelta para cancelar",
+        "Suelta DOWN para analizar", "Conectando", "● ESPERANDO LA APP", "Suelta para cancelar",
         "Conectando; suelta para cancelar", "√ ENVIADO PARA ANÁLISIS", "Transcribiendo",
-        "iPhone analiza la tarea", "Sin iPhone", "! IPHONE SIN CONEXIÓN", "Activa AI Passport en iPhone",
+        "%s analiza la tarea", "Sin app conectada", "! APP SIN CONEXIÓN", "Activa AI Passport en la app",
     },
     [PASSPORT_LANGUAGE_FR] = {
-        "LE GRAND MOI", "TERMINAL D'AGENT", { "AMBRE", "NOIR", "BLANC CHAUD", "VERT NUMÉRIQUE" },
+        "LE GRAND MOI", "TERMINAL D'AGENT", { "AMBRE", "NOIR", "BLANC CHAUD", "VERT NUMÉRIQUE" }, "PERSO",
         { "OBJECTIF SEMAINE", "OBJECTIF MENSUEL", "OBJECTIF ANNUEL" },
         { "Objectif semaine en attente", "Objectif mensuel en attente", "Objectif annuel en attente" },
-        "TÂCHES DU JOUR", "Tâches iPhone en attente", "OK: Thème  OKx2: Réglages",
+        "TÂCHES DU JOUR", "Tâches du jour en attente", "OK: Thème  OKx2: Réglages",
         "UP/DOWN: Changer  OKx2: Réglages",
         "Maintenir UP: chat DOWN: tâche", "VOUS", "HQ", "Maintenir UP pour parler", "HQ parle",
         "Transcription", "HQ écrit", "Maintenir UP pour continuer", "Connexion perdue", "RÉGLAGES",
-        "CONNEXION", "[IPHONE EN ATTENTE]", "● IPHONE CONNECTÉ", "FIRMWARE", "THÈME",
+        "CONNEXION", "[APP EN ATTENTE]", "● %s CONNECTÉ", "FIRMWARE", "THÈME",
         "UP: Retour    OK: Changer thème", "● ENREGISTREMENT", "● NOTE DE TÂCHE", "Relâcher pour envoyer",
-        "Relâcher DOWN pour analyser", "Connexion", "● IPHONE EN ATTENTE", "Relâcher pour annuler",
+        "Relâcher DOWN pour analyser", "Connexion", "● APP EN ATTENTE", "Relâcher pour annuler",
         "Connexion; relâcher pour annuler", "√ ENVOYÉ À L'ANALYSE", "Transcription",
-        "iPhone analyse la tâche", "Aucun iPhone", "! IPHONE NON CONNECTÉ", "Activez AI Passport sur iPhone",
+        "%s analyse la tâche", "Aucune app", "! APP NON CONNECTÉE", "Activez AI Passport dans l'app",
     },
     [PASSPORT_LANGUAGE_DE] = {
-        "MEIN GROSSES ICH", "AGENTENTERMINAL", { "BERNSTEIN", "SCHWARZ", "WARMWEISS", "DIGITALGRÜN" },
+        "MEIN GROSSES ICH", "AGENTENTERMINAL", { "BERNSTEIN", "SCHWARZ", "WARMWEISS", "DIGITALGRÜN" }, "EIGENE",
         { "WOCHENZIEL", "MONATSZIEL", "JAHRESZIEL" },
         { "Warte auf Wochenziel", "Warte auf Monatsziel", "Warte auf Jahresziel" },
-        "HEUTIGE AUFGABEN", "Warte auf iPhone-Aufgaben", "OK: Thema  2xOK: Einst.",
+        "HEUTIGE AUFGABEN", "Warte auf heutige Aufgaben", "OK: Thema  2xOK: Einst.",
         "UP/DOWN: Wechsel  2xOK: Einst.",
         "UP halten: Chat DOWN: Aufgabe", "DU", "HQ", "UP halten zum Sprechen", "HQ spricht",
         "Transkription", "HQ schreibt", "UP halten zum Fortsetzen", "Verbindung getrennt", "EINSTELLUNGEN",
-        "VERBINDUNG", "[WARTE AUF IPHONE]", "● IPHONE VERBUNDEN", "FIRMWARE", "THEMA",
+        "VERBINDUNG", "[WARTE AUF APP]", "● %s VERBUNDEN", "FIRMWARE", "THEMA",
         "UP: Zurück    OK: Thema", "● AUFNAHME", "● AUFGABE AUFNEHMEN", "Loslassen zum Senden",
-        "DOWN loslassen: Analyse", "Verbinden", "● WARTE AUF IPHONE", "Loslassen: Abbruch",
+        "DOWN loslassen: Analyse", "Verbinden", "● WARTE AUF APP", "Loslassen: Abbruch",
         "Verbindung; loslassen: Abbruch", "√ ZUR ANALYSE GESENDET", "Transkription",
-        "iPhone analysiert Aufgabe", "Kein iPhone", "! IPHONE NICHT VERBUNDEN", "AI Passport am iPhone aktivieren",
+        "%s analysiert Aufgabe", "Keine App", "! APP NICHT VERBUNDEN", "AI Passport in der App aktivieren",
     },
     [PASSPORT_LANGUAGE_KO] = {
-        "위대한 나", "요원 단말기", { "호박색", "검정", "따뜻한 흰색", "디지털 그린" },
+        "위대한 나", "요원 단말기", { "호박색", "검정", "따뜻한 흰색", "디지털 그린" }, "내 색상",
         { "주간 목표", "월간 목표", "연간 목표" },
         { "주간 목표 대기 중", "월간 목표 대기 중", "연간 목표 대기 중" },
-        "오늘의 작업", "iPhone 작업 동기화 대기", "OK: 테마  OKx2: 설정",
+        "오늘의 작업", "오늘의 작업 동기화 대기", "OK: 테마  OKx2: 설정",
         "UP/DOWN: 전환  OKx2: 설정",
         "UP 길게: 대화 DOWN: 작업", "나", "HQ", "UP을 길게 눌러 말하기", "HQ 말하는 중",
         "받아쓰기 중", "HQ 입력 중", "UP을 길게 눌러 계속", "연결 끊김", "시스템 설정", "연결 상태",
-        "[IPHONE 대기]", "● IPHONE 연결됨", "펌웨어 버전", "테마 선택",
+        "[APP 대기]", "● %s 연결됨", "펌웨어 버전", "테마 선택",
         "UP: 돌아가기    OK: 테마 변경", "● 녹음 중", "● 작업 녹음 중", "놓아서 보내기",
-        "DOWN을 놓아 분석", "연결 중", "● IPHONE 대기", "놓아서 취소",
-        "연결 중; 놓아서 취소", "√ 작업 분석으로 전송됨", "받아쓰기 중", "iPhone 작업 분석 중",
-        "iPhone 미연결", "! 휴대폰 미연결", "iPhone에서 AI Passport 켜기",
+        "DOWN을 놓아 분석", "연결 중", "● APP 대기", "놓아서 취소",
+        "연결 중; 놓아서 취소", "√ 작업 분석으로 전송됨", "받아쓰기 중", "%s 작업 분석 중",
+        "APP 미연결", "! APP 미연결", "APP에서 AI Passport 켜기",
     },
     [PASSPORT_LANGUAGE_JA] = {
-        "偉大な私", "エージェント端末", { "アンバー", "ブラック", "ウォーム白", "デジタル緑" },
+        "偉大な私", "エージェント端末", { "アンバー", "ブラック", "ウォーム白", "デジタル緑" }, "カスタム",
         { "今週の目標", "今月の目標", "年間目標" },
         { "今週の目標を待機", "今月の目標を待機", "年間目標を待機" },
-        "今日のタスク", "iPhoneのタスクを待機", "OK: テーマ  OKx2: 設定",
+        "今日のタスク", "今日のタスクを待機", "OK: テーマ  OKx2: 設定",
         "UP/DOWN: 切替  OKx2: 設定",
         "UP長押し: 会話 DOWN: タスク", "あなた", "HQ", "UP長押しで話す", "HQが発話中",
         "文字起こし中", "HQが入力中", "UP長押しで続ける", "接続が切れました", "システム設定", "接続状態",
-        "[IPHONE待機]", "● IPHONE接続済み", "ファームウェア", "テーマ選択",
+        "[APP待機]", "● %s接続済み", "ファームウェア", "テーマ選択",
         "UP: 戻る    OK: テーマ変更", "● 録音中", "● タスク録音中", "離して送信",
-        "DOWNを離して分析", "接続中", "● IPHONE待機", "離してキャンセル",
-        "接続中; 離してキャンセル", "√ タスク分析へ送信", "文字起こし中", "iPhoneがタスクを分析中",
-        "iPhone未接続", "! スマホ未接続", "iPhoneでAI Passportを有効化",
+        "DOWNを離して分析", "接続中", "● APP待機", "離してキャンセル",
+        "接続中; 離してキャンセル", "√ タスク分析へ送信", "文字起こし中", "%sがタスクを分析中",
+        "APP未接続", "! APP未接続", "APPでAI Passportを有効化",
     },
 };
 
@@ -329,6 +348,12 @@ static lv_obj_t *s_settings_theme_title_label;
 static lv_obj_t *s_settings_controls_label;
 static lv_timer_t *s_timer;
 static unsigned s_theme_index;
+// A color pushed by the app becomes one extra skin after the presets.
+static companion_theme_t s_custom_theme = { "自定义", 0, 0, 0, 0, 0, 0, 0, 0 };
+static bool s_has_custom_theme;
+static uint32_t s_custom_color;
+static esp_timer_handle_t s_theme_save_timer;
+static char s_host_name[PASSPORT_HOST_NAME_CAP + 1];
 static unsigned s_scope_index;
 static unsigned s_task_index;
 static unsigned s_voice_anim_frame;
@@ -358,7 +383,17 @@ static volatile bool s_speaker_prefill_pending;
 static volatile bool s_speaker_end_received;
 static bool s_initialized;
 static uint8_t s_address_type;
+// The active host receives voice events and audio and may write the board.
 static uint16_t s_connection = BLE_HS_CONN_HANDLE_NONE;
+// A second link that has not yet declared whether it may take over.
+static uint16_t s_candidate = BLE_HS_CONN_HANDLE_NONE;
+static volatile passport_host_role_t s_active_role = PASSPORT_HOST_ROLE_UNKNOWN;
+static bool s_candidate_event_subscribed;
+static bool s_candidate_audio_subscribed;
+static bool s_takeover_paused;
+static bool s_callouts_ready;
+static struct ble_npl_callout s_candidate_callout;
+static struct ble_npl_callout s_takeover_callout;
 static uint16_t s_ctrl_handle;
 static uint16_t s_event_handle;
 static uint16_t s_audio_handle;
@@ -382,7 +417,95 @@ static QueueHandle_t s_speaker_queue;
 
 static int gap_event(struct ble_gap_event *event, void *arg);
 static void advertise(void);
+static int handle_host_role(uint16_t connection, passport_host_role_t role);
 static void apply_language(passport_language_t language);
+static void apply_theme(void);
+
+static unsigned theme_count(void)
+{
+    return COMPANION_THEME_COUNT + (s_has_custom_theme ? 1U : 0U);
+}
+
+static const companion_theme_t *current_theme(void)
+{
+    if (s_theme_index >= COMPANION_THEME_COUNT) {
+        return s_has_custom_theme ? &s_custom_theme : &companion_themes[0];
+    }
+    return &companion_themes[s_theme_index];
+}
+
+static void set_custom_theme(uint32_t color)
+{
+    passport_palette_t palette;
+    passport_palette_from_color(color, &palette);
+    s_custom_theme.background = palette.background;
+    s_custom_theme.surface = palette.surface;
+    s_custom_theme.primary = palette.primary;
+    s_custom_theme.secondary = palette.secondary;
+    s_custom_theme.accent = palette.accent;
+    s_custom_theme.track = palette.track;
+    s_custom_theme.border = palette.border;
+    s_custom_theme.glow_opacity = palette.glow_opacity;
+    s_custom_color = color & 0xFFFFFFU;
+    s_has_custom_theme = true;
+}
+
+static const char *host_name(void)
+{
+    return s_host_name[0] ? s_host_name : DEFAULT_HOST_NAME;
+}
+
+static void save_theme_preferences(void)
+{
+    nvs_handle_t handle;
+    if (nvs_open(THEME_NVS_NAMESPACE, NVS_READWRITE, &handle) != ESP_OK) {
+        ESP_LOGW(TAG, "主题设置无法保存");
+        return;
+    }
+    nvs_set_u8(handle, "theme_idx", (uint8_t)s_theme_index);
+    if (s_has_custom_theme) {
+        nvs_set_u32(handle, "theme_rgb", s_custom_color);
+    } else {
+        nvs_erase_key(handle, "theme_rgb");
+    }
+    nvs_commit(handle);
+    nvs_close(handle);
+}
+
+static void theme_save_timer_fired(void *argument)
+{
+    (void)argument;
+    save_theme_preferences();
+}
+
+// Runs from the LVGL task (keys and the board tick), so the flash write is
+// deferred to the esp_timer task instead of blocking input handling.
+static void schedule_theme_save(void)
+{
+    if (!s_theme_save_timer) {
+        const esp_timer_create_args_t args = {
+            .callback = theme_save_timer_fired,
+            .name = "passport_theme_save",
+        };
+        if (esp_timer_create(&args, &s_theme_save_timer) != ESP_OK) return;
+    }
+    esp_timer_stop(s_theme_save_timer);
+    esp_timer_start_once(s_theme_save_timer, THEME_SAVE_DELAY_US);
+}
+
+static void load_theme_preferences(void)
+{
+    if (demo_radio_nvs_prepare() != ESP_OK) return;
+    nvs_handle_t handle;
+    if (nvs_open(THEME_NVS_NAMESPACE, NVS_READONLY, &handle) != ESP_OK) return;
+    uint32_t color;
+    if (nvs_get_u32(handle, "theme_rgb", &color) == ESP_OK) set_custom_theme(color);
+    uint8_t index;
+    if (nvs_get_u8(handle, "theme_idx", &index) == ESP_OK && index < theme_count()) {
+        s_theme_index = index;
+    }
+    nvs_close(handle);
+}
 
 static void board_store(const passport_board_t *board)
 {
@@ -409,7 +532,6 @@ static int gatt_access(
     void *argument
 )
 {
-    (void)connection;
     (void)attribute;
     (void)argument;
     if (context->op != BLE_GATT_ACCESS_OP_WRITE_CHR) return BLE_ATT_ERR_UNLIKELY;
@@ -423,6 +545,13 @@ static int gatt_access(
     if (os_mbuf_copydata(context->om, 0, length, payload) != 0) {
         return BLE_ATT_ERR_UNLIKELY;
     }
+
+    passport_host_role_t role;
+    if (passport_host_parse_role(payload, length, &role)) {
+        return handle_host_role(connection, role);
+    }
+    // Only the active host may change what the Passport shows.
+    if (connection != s_connection) return BLE_ATT_ERR_WRITE_NOT_PERMITTED;
 
     passport_board_t next = board_load(NULL);
     if (!passport_board_apply(&next, payload, length)) {
@@ -467,10 +596,10 @@ static int speaker_access(
     void *argument
 )
 {
-    (void)connection;
     (void)attribute;
     (void)argument;
     if (context->op != BLE_GATT_ACCESS_OP_WRITE_CHR) return BLE_ATT_ERR_UNLIKELY;
+    if (connection != s_connection) return BLE_ATT_ERR_WRITE_NOT_PERMITTED;
 
     uint16_t length = OS_MBUF_PKTLEN(context->om);
     if (length < AUDIO_CHUNK_HEADER_BYTES || length > 252) {
@@ -832,8 +961,12 @@ static void speaker_task(void *argument)
     }
 }
 
-static void advertise(void)
+static void start_advertising(bool takeover)
 {
+    // Restarting replaces the interval when switching between plain and
+    // takeover advertising; starting twice would fail with EALREADY.
+    if (ble_gap_adv_active()) ble_gap_adv_stop();
+
     struct ble_hs_adv_fields advertisement = { 0 };
     advertisement.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
     // CoreBluetooth service-filtered scans match the primary advertising
@@ -854,8 +987,10 @@ static void advertise(void)
     struct ble_gap_adv_params parameters = { 0 };
     parameters.conn_mode = BLE_GAP_CONN_MODE_UND;
     parameters.disc_mode = BLE_GAP_DISC_MODE_GEN;
-    parameters.itvl_min = BLE_GAP_ADV_ITVL_MS(100);
-    parameters.itvl_max = BLE_GAP_ADV_ITVL_MS(150);
+    // While a host is connected the advertising only has to be found by the
+    // preferred host's background scan, so it runs at a lower duty cycle.
+    parameters.itvl_min = BLE_GAP_ADV_ITVL_MS(takeover ? 400 : 100);
+    parameters.itvl_max = BLE_GAP_ADV_ITVL_MS(takeover ? 500 : 150);
     result = ble_gap_adv_start(
         s_address_type,
         NULL,
@@ -865,12 +1000,169 @@ static void advertise(void)
         NULL
     );
     if (result != 0) goto fail;
-    s_page_state = BLE_PAGE_ADVERTISING;
+    if (!takeover) s_page_state = BLE_PAGE_ADVERTISING;
     return;
 
 fail:
+    if (takeover) {
+        ESP_LOGW(TAG, "接管广播启动失败:%d", result);
+        return;
+    }
     s_error = result;
     s_page_state = BLE_PAGE_FAILED;
+}
+
+static void advertise(void)
+{
+    start_advertising(false);
+}
+
+// Keep advertising while a secondary host holds the Passport, so the user's
+// preferred host can still find it and take over; otherwise stay silent.
+static void update_takeover_advertising(void)
+{
+    if (!s_page_active || s_connection == BLE_HS_CONN_HANDLE_NONE) return;
+    if (s_candidate != BLE_HS_CONN_HANDLE_NONE) return;
+    bool wanted = !s_takeover_paused && passport_host_accepts_takeover(s_active_role);
+    if (wanted && !ble_gap_adv_active()) {
+        start_advertising(true);
+    } else if (!wanted && ble_gap_adv_active()) {
+        ble_gap_adv_stop();
+    }
+}
+
+// A new active host names itself with D:; until then show the default, not
+// the previous host's name.
+static void forget_host_name(void)
+{
+    passport_board_t board = board_load(NULL);
+    if (!board.host_name[0]) return;
+    board.host_name[0] = '\0';
+    board_store(&board);
+}
+
+static void configure_link(uint16_t connection)
+{
+    ble_gap_set_prefered_le_phy(
+        connection,
+        BLE_GAP_LE_PHY_2M_MASK,
+        BLE_GAP_LE_PHY_2M_MASK,
+        0
+    );
+    const struct ble_gap_upd_params parameters = {
+        .itvl_min = 12,
+        .itvl_max = 24,
+        .latency = 0,
+        .supervision_timeout = 400,
+        .min_ce_len = 0,
+        .max_ce_len = 0,
+    };
+    ble_gap_update_params(connection, &parameters);
+    ble_gattc_exchange_mtu(connection, NULL, NULL);
+}
+
+static void announce_capabilities(void)
+{
+    if (!s_event_subscribed || !s_audio_subscribed) return;
+    char capability[96];
+    snprintf(
+        capability,
+        sizeof(capability),
+        "{\"event\":\"speaker.config\",\"sample_rate\":%u,\"block_samples\":%u}\n",
+        (unsigned)SPEAKER_COMPACT_SAMPLE_RATE,
+        (unsigned)SPEAKER_COMPACT_BLOCK_SAMPLES
+    );
+    if (!notify_event(capability)) {
+        ESP_LOGW(TAG, "扬声器压缩能力通知失败,手机将回退 16kHz");
+    }
+    // Apps only send the D: and K: lines after seeing this, because older
+    // firmware rejects unknown board lines.
+    notify_event("{\"event\":\"features\",\"host_name\":true,\"theme_color\":true}\n");
+}
+
+static void schedule_candidate_timeout(uint32_t milliseconds)
+{
+    if (!s_callouts_ready) return;
+    ble_npl_callout_reset(&s_candidate_callout, ble_npl_time_ms_to_ticks32(milliseconds));
+}
+
+static void candidate_timeout(struct ble_npl_event *event)
+{
+    (void)event;
+    if (s_candidate == BLE_HS_CONN_HANDLE_NONE) return;
+    ESP_LOGW(TAG, "第二台主机未让出,断开(handle=%u)", s_candidate);
+    ble_gap_terminate(s_candidate, BLE_ERR_REM_USER_CONN_TERM);
+}
+
+static void takeover_resume(struct ble_npl_event *event)
+{
+    (void)event;
+    s_takeover_paused = false;
+    update_takeover_advertising();
+}
+
+// An app that predates role lines subscribed without declaring itself; it
+// would grab the Passport the old way, so refuse it and pause the invitation.
+static void drop_legacy_candidate(void)
+{
+    uint16_t candidate = s_candidate;
+    ESP_LOGW(TAG, "第二台主机未声明优先级(旧版 App),断开(handle=%u)", candidate);
+    s_takeover_paused = true;
+    if (s_callouts_ready) {
+        ble_npl_callout_reset(
+            &s_takeover_callout,
+            ble_npl_time_ms_to_ticks32(LEGACY_TAKEOVER_PAUSE_MS)
+        );
+    }
+    ble_gap_terminate(candidate, BLE_ERR_REM_USER_CONN_TERM);
+}
+
+static void promote_candidate(passport_host_role_t role)
+{
+    uint16_t previous = s_connection;
+    // Tell the previous host why it is losing the link, so its app treats the
+    // drop as a handoff rather than a failure.
+    notify_event("{\"event\":\"host.yield\"}\n");
+    s_ptt_active = false;
+    abort_speaker_playback();
+
+    s_connection = s_candidate;
+    s_candidate = BLE_HS_CONN_HANDLE_NONE;
+    s_active_role = role;
+    forget_host_name();
+    s_event_subscribed = s_candidate_event_subscribed;
+    s_audio_subscribed = s_candidate_audio_subscribed;
+    s_candidate_event_subscribed = false;
+    s_candidate_audio_subscribed = false;
+    if (s_callouts_ready) ble_npl_callout_stop(&s_candidate_callout);
+    s_page_state = BLE_PAGE_CONNECTED;
+    ESP_LOGI(TAG, "优先主机接管(handle=%u),断开原主机(handle=%u)", s_connection, previous);
+
+    if (previous != BLE_HS_CONN_HANDLE_NONE) {
+        ble_gap_terminate(previous, BLE_ERR_REM_USER_CONN_TERM);
+    }
+    announce_capabilities();
+    update_takeover_advertising();
+}
+
+static int handle_host_role(uint16_t connection, passport_host_role_t role)
+{
+    if (connection == s_connection) {
+        s_active_role = role;
+        ESP_LOGI(TAG, "当前主机声明优先级:%d", (int)role);
+        update_takeover_advertising();
+        return 0;
+    }
+    if (connection != s_candidate) return PASSPORT_HOST_BUSY_ATT_ERROR;
+    if (passport_host_arbitrate(s_active_role, role) == PASSPORT_HOST_PROMOTE_CANDIDATE) {
+        promote_candidate(role);
+        return 0;
+    }
+    // Refuse with a dedicated error the app recognizes, then disconnect it if
+    // it does not leave on its own.
+    ESP_LOGI(TAG, "第二台主机无权接管(角色=%d),拒绝", (int)role);
+    schedule_candidate_timeout(CANDIDATE_REJECT_GRACE_MS);
+    return PASSPORT_HOST_BUSY_ATT_ERROR;
 }
 
 static int gap_event(struct ble_gap_event *event, void *argument)
@@ -879,46 +1171,90 @@ static int gap_event(struct ble_gap_event *event, void *argument)
     switch (event->type) {
     case BLE_GAP_EVENT_CONNECT:
         if (event->connect.status != 0) {
-            advertise();
+            if (s_connection == BLE_HS_CONN_HANDLE_NONE) {
+                advertise();
+            } else {
+                update_takeover_advertising();
+            }
             break;
         }
-        s_connection = event->connect.conn_handle;
-        s_page_state = BLE_PAGE_CONNECTED;
-        ble_gap_set_prefered_le_phy(
-            s_connection,
-            BLE_GAP_LE_PHY_2M_MASK,
-            BLE_GAP_LE_PHY_2M_MASK,
-            0
-        );
-        {
-            const struct ble_gap_upd_params parameters = {
-                .itvl_min = 12,
-                .itvl_max = 24,
-                .latency = 0,
-                .supervision_timeout = 400,
-                .min_ce_len = 0,
-                .max_ce_len = 0,
-            };
-            ble_gap_update_params(s_connection, &parameters);
+        configure_link(event->connect.conn_handle);
+        if (s_connection == BLE_HS_CONN_HANDLE_NONE) {
+            s_connection = event->connect.conn_handle;
+            s_active_role = PASSPORT_HOST_ROLE_UNKNOWN;
+            forget_host_name();
+            s_page_state = BLE_PAGE_CONNECTED;
+            ESP_LOGI(TAG, "主机已连接(handle=%u)", s_connection);
+        } else if (s_candidate == BLE_HS_CONN_HANDLE_NONE) {
+            s_candidate = event->connect.conn_handle;
+            s_candidate_event_subscribed = false;
+            s_candidate_audio_subscribed = false;
+            schedule_candidate_timeout(CANDIDATE_DECLARE_TIMEOUT_MS);
+            ESP_LOGI(TAG, "第二台主机接入,等待声明优先级(handle=%u)", s_candidate);
+        } else {
+            ble_gap_terminate(event->connect.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
         }
-        ble_gattc_exchange_mtu(s_connection, NULL, NULL);
-        ESP_LOGI(TAG, "iPhone 已连接(handle=%u)", s_connection);
         break;
 
-    case BLE_GAP_EVENT_DISCONNECT:
-        ESP_LOGI(TAG, "连接断开(reason=%d)", event->disconnect.reason);
+    case BLE_GAP_EVENT_DISCONNECT: {
+        uint16_t handle = event->disconnect.conn.conn_handle;
+        ESP_LOGI(TAG, "连接断开(handle=%u reason=%d)", handle, event->disconnect.reason);
+        if (handle == s_candidate) {
+            s_candidate = BLE_HS_CONN_HANDLE_NONE;
+            s_candidate_event_subscribed = false;
+            s_candidate_audio_subscribed = false;
+            if (s_callouts_ready) ble_npl_callout_stop(&s_candidate_callout);
+            update_takeover_advertising();
+            break;
+        }
+        // A host replaced by the preferred one: already handed over.
+        if (handle != s_connection) break;
+
         s_ptt_active = false;
         abort_speaker_playback();
         s_event_subscribed = false;
         s_audio_subscribed = false;
         s_connection = BLE_HS_CONN_HANDLE_NONE;
-        if (s_page_active) advertise();
+        s_active_role = PASSPORT_HOST_ROLE_UNKNOWN;
+        if (s_candidate != BLE_HS_CONN_HANDLE_NONE) {
+            // The waiting host becomes the active one; it still declares its
+            // role, which is then accepted as the active host's own.
+            s_connection = s_candidate;
+            s_candidate = BLE_HS_CONN_HANDLE_NONE;
+            forget_host_name();
+            s_event_subscribed = s_candidate_event_subscribed;
+            s_audio_subscribed = s_candidate_audio_subscribed;
+            s_candidate_event_subscribed = false;
+            s_candidate_audio_subscribed = false;
+            if (s_callouts_ready) ble_npl_callout_stop(&s_candidate_callout);
+            s_page_state = BLE_PAGE_CONNECTED;
+            announce_capabilities();
+        } else if (s_page_active) {
+            advertise();
+        }
         break;
+    }
 
-    case BLE_GAP_EVENT_SUBSCRIBE:
-        if (event->subscribe.attr_handle == s_event_handle) {
+    case BLE_GAP_EVENT_SUBSCRIBE: {
+        uint16_t handle = event->subscribe.conn_handle;
+        bool is_event = event->subscribe.attr_handle == s_event_handle;
+        bool is_audio = event->subscribe.attr_handle == s_audio_handle;
+        if (handle == s_candidate) {
+            if (event->subscribe.reason == BLE_GAP_SUBSCRIBE_REASON_WRITE
+                && event->subscribe.cur_notify) {
+                drop_legacy_candidate();
+                break;
+            }
+            // Bonded hosts get their subscriptions restored on encryption;
+            // keep them in case this host is promoted.
+            if (is_event) s_candidate_event_subscribed = event->subscribe.cur_notify;
+            if (is_audio) s_candidate_audio_subscribed = event->subscribe.cur_notify;
+            break;
+        }
+        if (handle != s_connection) break;
+        if (is_event) {
             s_event_subscribed = event->subscribe.cur_notify;
-        } else if (event->subscribe.attr_handle == s_audio_handle) {
+        } else if (is_audio) {
             s_audio_subscribed = event->subscribe.cur_notify;
         }
         ESP_LOGI(
@@ -926,22 +1262,11 @@ static int gap_event(struct ble_gap_event *event, void *argument)
             "订阅状态:event=%d audio=%d mtu=%u",
             s_event_subscribed,
             s_audio_subscribed,
-            s_connection == BLE_HS_CONN_HANDLE_NONE ? 0 : ble_att_mtu(s_connection)
+            ble_att_mtu(s_connection)
         );
-        if (s_event_subscribed && s_audio_subscribed) {
-            char capability[96];
-            snprintf(
-                capability,
-                sizeof(capability),
-                "{\"event\":\"speaker.config\",\"sample_rate\":%u,\"block_samples\":%u}\n",
-                (unsigned)SPEAKER_COMPACT_SAMPLE_RATE,
-                (unsigned)SPEAKER_COMPACT_BLOCK_SAMPLES
-            );
-            if (!notify_event(capability)) {
-                ESP_LOGW(TAG, "扬声器压缩能力通知失败,手机将回退 16kHz");
-            }
-        }
+        announce_capabilities();
         break;
+    }
 
     case BLE_GAP_EVENT_REPEAT_PAIRING: {
         // The iPhone can forget its system bond while the Passport still has
@@ -958,7 +1283,7 @@ static int gap_event(struct ble_gap_event *event, void *argument)
             ESP_LOGE(TAG, "无法清除失效配对:%d", result);
             return BLE_GAP_REPEAT_PAIRING_IGNORE;
         }
-        ESP_LOGW(TAG, "iPhone 配对已失效,已清除旧密钥并重新配对");
+        ESP_LOGW(TAG, "主机配对已失效,已清除旧密钥并重新配对");
         return BLE_GAP_REPEAT_PAIRING_RETRY;
     }
 
@@ -1003,6 +1328,11 @@ static esp_err_t ble_start(void)
     if (error != ESP_OK) return error;
 
     s_initialized = true;
+    // Callouts run on the host task's event queue, alongside GAP and GATT
+    // callbacks, so the arbitration state needs no extra locking.
+    ble_npl_callout_init(&s_candidate_callout, nimble_port_get_dflt_eventq(), candidate_timeout, NULL);
+    ble_npl_callout_init(&s_takeover_callout, nimble_port_get_dflt_eventq(), takeover_resume, NULL);
+    s_callouts_ready = true;
     s_host_stopped = xSemaphoreCreateBinary();
     if (!s_host_stopped) return ESP_ERR_NO_MEM;
 
@@ -1012,8 +1342,12 @@ static esp_err_t ble_start(void)
     ble_hs_cfg.sm_io_cap = BLE_HS_IO_NO_INPUT_OUTPUT;
     ble_hs_cfg.sm_bonding = 1;
     ble_hs_cfg.sm_sc = 1;
-    ble_hs_cfg.sm_our_key_dist |= BLE_SM_PAIR_KEY_DIST_ENC;
-    ble_hs_cfg.sm_their_key_dist |= BLE_SM_PAIR_KEY_DIST_ENC;
+    // iOS reconnects from a private address that changes after Bluetooth is
+    // toggled and roughly every 15 minutes. Exchanging identity keys lets the
+    // controller resolve it to the bonded iPhone; without them the Passport
+    // sees a new peer, the bond lookup fails, and iOS asks to pair again.
+    ble_hs_cfg.sm_our_key_dist |= BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
+    ble_hs_cfg.sm_their_key_dist |= BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
     ble_svc_gap_init();
     ble_svc_gatt_init();
     ble_svc_gap_device_name_set(DEVICE_NAME);
@@ -1035,11 +1369,20 @@ static void ble_stop(void)
     s_ptt_active = false;
     abort_speaker_playback();
     ble_gap_adv_stop();
+    if (s_callouts_ready) {
+        ble_npl_callout_stop(&s_candidate_callout);
+        ble_npl_callout_stop(&s_takeover_callout);
+    }
     int result = nimble_port_stop();
     if (result == 0 && s_host_stopped) {
         xSemaphoreTake(s_host_stopped, portMAX_DELAY);
     }
     if (result == 0) {
+        if (s_callouts_ready) {
+            ble_npl_callout_deinit(&s_candidate_callout);
+            ble_npl_callout_deinit(&s_takeover_callout);
+            s_callouts_ready = false;
+        }
         nimble_port_deinit();
         s_initialized = false;
     } else {
@@ -1052,6 +1395,11 @@ static void ble_stop(void)
     s_event_subscribed = false;
     s_audio_subscribed = false;
     s_connection = BLE_HS_CONN_HANDLE_NONE;
+    s_candidate = BLE_HS_CONN_HANDLE_NONE;
+    s_active_role = PASSPORT_HOST_ROLE_UNKNOWN;
+    s_candidate_event_subscribed = false;
+    s_candidate_audio_subscribed = false;
+    s_takeover_paused = false;
     s_page_state = BLE_PAGE_OFF;
 }
 
@@ -1059,7 +1407,7 @@ static void render_board(const passport_board_t *board)
 {
     const companion_copy_t *copy = copy_for_language(board->language);
     const char *goals[] = { board->week_goal, board->month_goal, board->year_goal };
-    const companion_theme_t *theme = &companion_themes[s_theme_index];
+    const companion_theme_t *theme = current_theme();
 
     lv_label_set_text_fmt(s_goal_caption, "%s %u/3", copy->goal_labels[s_scope_index], s_scope_index + 1);
     lv_label_set_text(
@@ -1208,7 +1556,7 @@ static void render_connection_signal(void)
     const int8_t connected = companion_connected() ? 1 : 0;
     if (connected == s_rendered_connection_signal) return;
 
-    const companion_theme_t *theme = &companion_themes[s_theme_index];
+    const companion_theme_t *theme = current_theme();
     const uint32_t color = connected ? theme->accent : theme->track;
     for (unsigned i = 0; i < CONNECTION_SIGNAL_BAR_COUNT; i++) {
         lv_obj_set_style_bg_color(s_connection_signal_bars[i], lv_color_hex(color), 0);
@@ -1222,16 +1570,17 @@ static void render_settings(void)
     lv_label_set_text_fmt(
         s_settings_theme_label,
         "[%s]  %u/%u",
-        copy->theme_names[s_theme_index],
+        s_theme_index >= COMPANION_THEME_COUNT
+            ? copy->custom_theme_name
+            : copy->theme_names[s_theme_index],
         s_theme_index + 1,
-        (unsigned)COMPANION_THEME_COUNT
+        theme_count()
     );
-    lv_label_set_text(
-        s_settings_ble_label,
-        companion_connected()
-            ? copy->connected_iphone
-            : copy->waiting_iphone
-    );
+    if (companion_connected()) {
+        lv_label_set_text_fmt(s_settings_ble_label, copy->connected_host, host_name());
+    } else {
+        lv_label_set_text(s_settings_ble_label, copy->waiting_host);
+    }
 }
 
 static void show_companion_page(companion_page_t page)
@@ -1295,7 +1644,7 @@ static void render_voice_panel(uint32_t now)
         return;
     }
 
-    const companion_theme_t *theme = &companion_themes[s_theme_index];
+    const companion_theme_t *theme = current_theme();
     bool inline_conversation = s_companion_page == COMPANION_PAGE_CONVERSATION
                             && s_ptt_route == PTT_ROUTE_CONVERSATION;
     lv_obj_remove_flag(s_voice_panel, LV_OBJ_FLAG_HIDDEN);
@@ -1338,7 +1687,11 @@ static void render_voice_panel(uint32_t now)
     bool routes_to_task = s_ptt_route == PTT_ROUTE_TASK;
     if (s_recording) {
         lv_label_set_text(s_voice_title, routes_to_task ? copy->voice_task_recording : copy->voice_recording);
-        lv_label_set_text(s_voice_hint, routes_to_task ? copy->voice_release_task : copy->voice_release_send);
+        if (routes_to_task) {
+            lv_label_set_text_fmt(s_voice_hint, copy->voice_release_task, host_name());
+        } else {
+            lv_label_set_text(s_voice_hint, copy->voice_release_send);
+        }
         lv_obj_set_style_text_color(s_voice_title, lv_color_hex(theme->accent), 0);
     } else if (s_ptt_active) {
         lv_label_set_text(s_voice_title, inline_conversation ? copy->voice_connecting : copy->voice_wait_phone);
@@ -1346,10 +1699,14 @@ static void render_voice_panel(uint32_t now)
         lv_obj_set_style_text_color(s_voice_title, lv_color_hex(theme->primary), 0);
     } else if (s_voice_feedback_sent) {
         lv_label_set_text(s_voice_title, routes_to_task ? copy->voice_task_sent : copy->voice_transcribing);
-        lv_label_set_text(s_voice_hint, routes_to_task ? copy->voice_task_analyzing : "");
+        if (routes_to_task) {
+            lv_label_set_text_fmt(s_voice_hint, copy->voice_task_analyzing, host_name());
+        } else {
+            lv_label_set_text(s_voice_hint, "");
+        }
         lv_obj_set_style_text_color(s_voice_title, lv_color_hex(theme->accent), 0);
     } else {
-        lv_label_set_text(s_voice_title, inline_conversation ? copy->voice_no_iphone : copy->voice_no_phone);
+        lv_label_set_text(s_voice_title, inline_conversation ? copy->voice_no_host : copy->voice_no_phone);
         lv_label_set_text(s_voice_hint, inline_conversation ? "" : copy->voice_enable_hint);
         lv_obj_set_style_text_color(s_voice_title, lv_color_hex(theme->accent), 0);
     }
@@ -1371,6 +1728,29 @@ static void render_voice_panel(uint32_t now)
     s_voice_anim_frame++;
 }
 
+// Follow a color the app pushed. Only a change switches the skin, so a
+// preset the user picked on the device survives the app resending its color
+// on every connection.
+static void apply_board_theme_color(const passport_board_t *board)
+{
+    switch (board->theme_color_state) {
+    case PASSPORT_THEME_COLOR_UNSET:
+        return;
+    case PASSPORT_THEME_COLOR_NONE:
+        if (!s_has_custom_theme) return;
+        s_has_custom_theme = false;
+        if (s_theme_index >= COMPANION_THEME_COUNT) s_theme_index = 0;
+        break;
+    case PASSPORT_THEME_COLOR_CUSTOM:
+        if (s_has_custom_theme && s_custom_color == (board->theme_color & 0xFFFFFFU)) return;
+        set_custom_theme(board->theme_color);
+        s_theme_index = COMPANION_THEME_COUNT;
+        break;
+    }
+    apply_theme();
+    schedule_theme_save();
+}
+
 static void tick(lv_timer_t *timer)
 {
     (void)timer;
@@ -1379,6 +1759,8 @@ static void tick(lv_timer_t *timer)
     if (board.language != s_ui_language) {
         apply_language(board.language);
     }
+    memcpy(s_host_name, board.host_name, sizeof(s_host_name));
+    apply_board_theme_color(&board);
     uint32_t now = (uint32_t)xTaskGetTickCount();
     render_voice_panel(now);
     render_connection_signal();
@@ -1446,7 +1828,7 @@ static void apply_language(passport_language_t language)
 
 static void apply_theme(void)
 {
-    const companion_theme_t *theme = &companion_themes[s_theme_index];
+    const companion_theme_t *theme = current_theme();
     lv_obj_set_style_bg_color(s_screen, lv_color_hex(theme->background), 0);
     lv_obj_set_style_text_color(s_brand_label, lv_color_hex(theme->primary), 0);
     lv_obj_set_style_text_color(s_status_label, lv_color_hex(theme->primary), 0);
@@ -1575,7 +1957,7 @@ void demo_ble_enter(void)
         s_task_labels[i] = make_value_label(s_tasks_card, 7, 24 + i * 21, 210, 20);
         lv_label_set_long_mode(s_task_labels[i], LV_LABEL_LONG_MODE_DOTS);
     }
-    lv_label_set_text(s_task_labels[0], "等待手机同步今日任务");
+    lv_label_set_text(s_task_labels[0], "等待同步今日任务");
     s_footer_label = make_terminal_label(s_tasks_card, "长按上:对话  长按下:任务", 7, 133);
 
     s_task_detail_card = make_terminal_box(s_screen, 0, 0, 240, 320);
@@ -1615,7 +1997,7 @@ void demo_ble_enter(void)
     s_settings_card = make_terminal_box(s_screen, 0, 0, 240, 320);
     s_settings_title_label = make_terminal_label(s_settings_card, "系统设置", 10, 8);
     s_settings_connection_title_label = make_terminal_label(s_settings_card, "连接状态", 10, 52);
-    s_settings_ble_label = make_terminal_label(s_settings_card, "[等待 iPhone]", 10, 80);
+    s_settings_ble_label = make_terminal_label(s_settings_card, "[等待 App 连接]", 10, 80);
     s_settings_firmware_title_label = make_terminal_label(s_settings_card, "固件版本", 10, 126);
     make_terminal_label(s_settings_card, "AI Passport " PASSPORT_UI_VERSION, 10, 154);
     s_settings_theme_title_label = make_terminal_label(s_settings_card, "主题选择", 10, 200);
@@ -1635,10 +2017,11 @@ void demo_ble_enter(void)
         lv_obj_set_style_radius(s_voice_bars[i], 0, 0);
         lv_obj_set_style_pad_all(s_voice_bars[i], 0, 0);
     }
-    s_voice_hint = make_terminal_label(s_voice_panel, "松开按键发送到 iPhone", 10, 100);
+    s_voice_hint = make_terminal_label(s_voice_panel, "松开按键发送", 10, 100);
     lv_obj_add_flag(s_voice_panel, LV_OBJ_FLAG_HIDDEN);
 
     apply_language(PASSPORT_LANGUAGE_ZH_HANS);
+    load_theme_preferences();
     apply_theme();
     show_companion_page(COMPANION_PAGE_DASHBOARD);
     s_timer = lv_timer_create(tick, 100, NULL);
@@ -1663,6 +2046,10 @@ void demo_ble_exit(void)
     if (s_timer) {
         lv_timer_delete(s_timer);
         s_timer = NULL;
+    }
+    if (s_theme_save_timer && esp_timer_is_active(s_theme_save_timer)) {
+        esp_timer_stop(s_theme_save_timer);
+        save_theme_preferences();
     }
     ble_stop();
     if (s_screen) {
@@ -1775,7 +2162,7 @@ void demo_ble_key(bsp_btn_t button, bsp_btn_ev_t event)
         s_voice_feedback_until = 0;
         s_voice_feedback_sent = false;
         s_conversation_open_pending = false;
-        ESP_LOGI(TAG, "下键长按,请求 iPhone 任务整理录音");
+        ESP_LOGI(TAG, "下键长按,请求主机任务整理录音");
         return;
     }
 
@@ -1825,7 +2212,8 @@ void demo_ble_key(bsp_btn_t button, bsp_btn_ev_t event)
     }
 
     if (button == BSP_BTN_OK && event == BSP_BTN_CLICK) {
-        s_theme_index = (s_theme_index + 1) % COMPANION_THEME_COUNT;
+        s_theme_index = (s_theme_index + 1) % theme_count();
         apply_theme();
+        schedule_theme_save();
     }
 }

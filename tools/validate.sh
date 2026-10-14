@@ -33,6 +33,14 @@ run_static_checks() {
         -o "${test_dir}/test_passport_protocol"
     "${test_dir}/test_passport_protocol"
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/test_passport_host.c main/passport_host.c \
+        -o "${test_dir}/test_passport_host"
+    "${test_dir}/test_passport_host"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/test_passport_theme.c main/passport_theme.c \
+        -o "${test_dir}/test_passport_theme"
+    "${test_dir}/test_passport_theme"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
         tests/test_adpcm.c main/adpcm.c \
         -o "${test_dir}/test_adpcm"
     "${test_dir}/test_adpcm"

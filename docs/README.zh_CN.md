@@ -26,7 +26,7 @@ Demo。应用特有行为见根目录 [`README.zh_CN.md`](../README.zh_CN.md)。
 | 音频 | ES8311，I2S0 全双工 PCM，可播放和麦克风录音 | `bsp_audio_*` | PCM 读写为阻塞调用，应放工作任务；格式切换必须保留 BSP 内的 close/open 流程 |
 | 电池 | CW2017 的 SOC 与电压读取 | `bsp_battery_*` | 是可缺省能力；读数精度取决于电芯与 profile，不能等同于已标定结果 |
 | Wi-Fi | 按需 2.4 GHz STA 扫描 demo | `main/demo_wifi.c` | 仅扫描；不连接、不存凭证、不验证天线/射频表现 |
-| Bluetooth LE | 名为 `AI Passport` 的可连接加密 NimBLE 外设，支持持久配对与 `0xA2B0` 联动服务 | `main/demo_ble.c` | ESP32-C3 不支持蓝牙经典；完整任务与语音联动需要兼容的 iPhone 配套端；射频范围、共存与功耗需实测 |
+| Bluetooth LE | 名为 `AI Passport` 的可连接加密 NimBLE 外设，支持持久配对与 `0xA2B0` 联动服务 | `main/demo_ble.c` | ESP32-C3 不支持蓝牙经典；完整任务与语音联动需要 iPhone、iPad 或 Mac 上的 TheGreatMe；射频范围、共存与功耗需实测 |
 | 低功耗 | 两秒浅睡眠与五秒深睡眠，均以 RTC 定时器唤醒 | `main/demo_low_power.c` | 深睡眠会重启应用；当前 demo 只提供 RTC 定时器唤醒 |
 | 共享总线 | ES8311 与 CW2017 共用 I2C0 | `bsp_i2c_*` | 所有设备复用 BSP 持有的总线；不能为扫描或新设备再创建同端口总线 |
 | 日志与烧录 | ESP32-C3 原生 USB Serial/JTAG | ESP-IDF console | GPIO18/19 保留给 USB；UART0 默认 TX GPIO21 与背光冲突 |

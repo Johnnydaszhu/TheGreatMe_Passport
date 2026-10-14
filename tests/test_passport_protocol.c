@@ -82,5 +82,26 @@ int main(void)
     assert(passport_board_apply(&board, (const uint8_t *)legacy, strlen(legacy)));
     assert(strcmp(board.tasks[0].text, "旧版当前任务") == 0);
     assert(strcmp(board.week_goal, "旧版周目标") == 0);
+
+    // The host label and theme color are additive lines from newer apps.
+    assert(board.theme_color_state == PASSPORT_THEME_COLOR_UNSET);
+    const char host[] = "D:Mac\nK:3cff6b\n";
+    assert(passport_board_apply(&board, (const uint8_t *)host, strlen(host)));
+    assert(strcmp(board.host_name, "Mac") == 0);
+    assert(board.theme_color_state == PASSPORT_THEME_COLOR_CUSTOM);
+    assert(board.theme_color == 0x3CFF6B);
+
+    const char clear_color[] = "K:\n";
+    assert(passport_board_apply(&board, (const uint8_t *)clear_color, strlen(clear_color)));
+    assert(board.theme_color_state == PASSPORT_THEME_COLOR_NONE);
+
+    passport_board_t before_bad_color = board;
+    const char bad_color[] = "K:12345G\n";
+    assert(!passport_board_apply(&board, (const uint8_t *)bad_color, strlen(bad_color)));
+    const char short_color[] = "K:FFF\n";
+    assert(!passport_board_apply(&board, (const uint8_t *)short_color, strlen(short_color)));
+    const char long_host[] = "D:A host label that is far too long\n";
+    assert(!passport_board_apply(&board, (const uint8_t *)long_host, strlen(long_host)));
+    assert(memcmp(&board, &before_bad_color, sizeof(board)) == 0);
     return 0;
 }

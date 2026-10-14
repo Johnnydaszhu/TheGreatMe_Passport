@@ -5,7 +5,8 @@
 # TheGreatMe Passport
 
 这套开源固件把 FoloToy AI Passport 变成 TheGreatMe 的随身任务与语音终端：显示目标和
-今日任务，向总部发送语音，并通过 iPhone 配套端接收文字与语音回复。
+今日任务，向总部发送语音，并通过 iPhone、iPad 或 Mac 上的 TheGreatMe 接收文字与
+语音回复。
 
 ![AI Passport 终端按键说明](assets/images/thegreatme-passport-terminal-callouts-zh-cn-16x9.png)
 
@@ -38,7 +39,8 @@ https://github.com/Johnnydaszhu/TheGreatMe_Passport
 - 长按**上键**与总部对话；总部语音播放时短按上键可立即停止。
 - 长按**下键**记录并整理任务。
 - 短按**上键/下键**切换任务。
-- 短按**确定键**切换主题；双击确定键才进入设置页面。
+- 短按**确定键**切换主题；双击确定键才进入设置页面。也可以在 TheGreatMe 设置中自选
+  屏幕颜色。
 
 ## 输出与安全
 
@@ -46,7 +48,7 @@ https://github.com/Johnnydaszhu/TheGreatMe_Passport
 - `build/FoloToy-AI-Passport.bin`：用于安全应用分区烧录的固件。
 - 不要擦除已经配置的 Passport，必须保留设备身份和永久 Recovery。
 
-任务同步、语音识别、AI 回复和语音播放需要 TheGreatMe iPhone 配套端。详细的环境配置、
+任务同步、语音识别、AI 回复和语音播放需要 iPhone、iPad 或 Mac 上的 TheGreatMe。详细的环境配置、
 协议、硬件和贡献文档位于 [`docs/`](docs/)。本项目基于
 [`FoloToy/ai-passport`](https://github.com/FoloToy/ai-passport)，采用
 [MIT License](LICENSE)。

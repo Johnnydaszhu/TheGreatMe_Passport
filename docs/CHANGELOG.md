@@ -6,6 +6,33 @@
 
 ## Unreleased
 
+- Exchange BLE identity keys when pairing with an iPhone, so the Passport still
+  recognizes the phone after iOS rotates its private address (whenever
+  Bluetooth is toggled and about every 15 minutes). Reconnecting no longer
+  triggers another iOS pairing request. A phone paired with earlier firmware
+  must forget AI Passport in iOS Bluetooth settings once and pair again.
+- Keep up to 8 paired devices (was 3). Pairing an iPhone, an iPad and a Mac
+  could evict the oldest bond, which forced that device to forget AI Passport
+  in its Bluetooth settings before it could reconnect.
+- The device the user marks as preferred in TheGreatMe now takes over a
+  connected Passport right away. Hosts declare `H:P` (preferred), `H:S`
+  (another device is preferred) or `H:A` (no preference) after connecting.
+  While a secondary host holds the Passport it keeps advertising at a low
+  rate on a second connection slot; the preferred host connects, the
+  previous host receives `host.yield` and is disconnected. Other hosts are
+  refused with ATT error 0x80. Apps that do not declare a role keep the
+  previous first-come-first-served behavior.
+- The terminal no longer assumes the companion is an iPhone. Waiting,
+  connected and voice prompts use device-neutral wording, and the connected
+  line names the host the app reports with the new `D:<platform>` board line
+  (for example `Mac` or `iPad`).
+- Added a custom screen color picked in TheGreatMe. The `K:RRGGBB` board line
+  derives a dark single-color skin from that color (too-dark picks are
+  brightened while keeping their hue), and an empty `K:` returns to the
+  built-in skins. The custom skin joins the OK-button theme cycle, and the
+  selected theme and color persist in NVS across restarts. After connecting,
+  the firmware sends a `features` event so the app only sends `D:` and `K:` to
+  firmware that understands them.
 - Added an on-demand, read-only publisher screenshot response that streams the
   currently rendered terminal frame without retaining a full-screen copy or
   changing user data and device settings.

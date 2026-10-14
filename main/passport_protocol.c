@@ -32,6 +32,47 @@ static bool copy_text(char *dst, const uint8_t *src, size_t len)
     return true;
 }
 
+static bool copy_host_name(char *dst, const uint8_t *src, size_t len)
+{
+    if (!dst || !src || len > PASSPORT_HOST_NAME_CAP) return false;
+    memcpy(dst, src, len);
+    dst[len] = '\0';
+    return true;
+}
+
+static int hex_digit(uint8_t c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+static bool parse_theme_color(
+    const uint8_t *text,
+    size_t len,
+    passport_theme_color_state_t *state,
+    uint32_t *color
+)
+{
+    if (!state || !color) return false;
+    if (len == 0) {
+        *state = PASSPORT_THEME_COLOR_NONE;
+        *color = 0;
+        return true;
+    }
+    if (!text || len != 6) return false;
+    uint32_t parsed = 0;
+    for (size_t i = 0; i < len; i++) {
+        int digit = hex_digit(text[i]);
+        if (digit < 0) return false;
+        parsed = (parsed << 4) | (uint32_t)digit;
+    }
+    *state = PASSPORT_THEME_COLOR_CUSTOM;
+    *color = parsed;
+    return true;
+}
+
 static bool copy_dialogue_text(char *dst, const uint8_t *src, size_t len)
 {
     if (!dst || !src || len > PASSPORT_DIALOGUE_TEXT_CAP) return false;
@@ -134,6 +175,16 @@ bool passport_board_apply(passport_board_t *board, const uint8_t *payload, size_
                 break;
             case 'L':
                 if (!parse_language(value, value_len, &next.language)) return false;
+                changed = true;
+                break;
+            case 'D':
+                if (!copy_host_name(next.host_name, value, value_len)) return false;
+                changed = true;
+                break;
+            case 'K':
+                if (!parse_theme_color(value, value_len, &next.theme_color_state, &next.theme_color)) {
+                    return false;
+                }
                 changed = true;
                 break;
             case 'Q':

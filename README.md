@@ -6,7 +6,8 @@
 
 Open firmware that turns a FoloToy AI Passport into a pocket task and voice
 terminal for TheGreatMe. It shows your goals and daily tasks, records messages
-for Headquarters, and receives text and voice replies from the iPhone companion.
+for Headquarters, and receives text and voice replies from the TheGreatMe app
+on iPhone, iPad or Mac.
 
 ![AI Passport terminal controls](assets/images/thegreatme-passport-terminal-callouts-16x9.png)
 
@@ -40,7 +41,8 @@ Do not change product behavior, commit, or push unless I explicitly ask.
 - Hold **UP** to talk to Headquarters; short-press it to stop a playing reply.
 - Hold **DOWN** to capture and organize a task.
 - Short-press **UP/DOWN** to move between tasks.
-- Short-press **OK** to change theme; double-press it to open Settings.
+- Short-press **OK** to change theme; double-press it to open Settings. A custom
+  screen color can be picked in TheGreatMe settings.
 
 ## Output and safety
 
@@ -48,7 +50,7 @@ Do not change product behavior, commit, or push unless I explicitly ask.
 - `build/FoloToy-AI-Passport.bin` — application image for safe app-only flashing.
 - Never erase a provisioned Passport; its identity and permanent Recovery must remain.
 
-The TheGreatMe iPhone bridge is required for synchronization, recognition, AI
+The TheGreatMe app (iPhone, iPad or Mac) is required for synchronization, recognition, AI
 replies, and reply audio. Detailed setup, protocol, hardware, and contribution
 documentation lives in [`docs/`](docs/). This downstream project is based on
 [`FoloToy/ai-passport`](https://github.com/FoloToy/ai-passport) and uses the
